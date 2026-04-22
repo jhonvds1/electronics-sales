@@ -1,50 +1,208 @@
+"""
+transform_electronics_sales.py
+--------------------------------
+Pipeline de transformação de dados de vendas de eletrônicos.
+
+Etapas:
+    1. Leitura do CSV bruto via DuckDB
+    2. Filtros de qualidade, cast de datas e cálculo de sale_value
+    3. Deduplicação por order_id (mantém registro mais recente)
+    4. Normalização de strings (TRIM + INITCAP) em colunas VARCHAR
+    5. Validação de integridade do resultado final
+
+Autor  : <seu_nome>
+Data   : 2026-04-22
+Versão : 1.0.0
+"""
+
+import logging
+from typing import Tuple
+
 import duckdb
+import pandas as pd
 
 
-# Carrega o CSV
-resultado = duckdb.sql("SELECT * FROM 'data/electronics_sales_raw.csv'")
+# ── Configuração de logging ───────────────────────────────────────────────────
 
-# Transformação
-resultado = duckdb.sql("""
-    SELECT 
-        *,
-        ROUND(quantity * unit_price * (1 - discount_pct), 2) AS sale_value
-    FROM resultado
-    WHERE quantity > 0
-      AND unit_price > 0
-      AND discount_pct BETWEEN 0 AND 1
-""")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger_transform = logging.getLogger("TRANSFORM")
 
-resultado = duckdb.sql("""
-    SELECT
-        * EXCLUDE (order_date, last_purchase_date, first_purchase_date),
-        order_date::TIMESTAMP           AS order_date,
-        last_purchase_date::TIMESTAMP   AS last_purchase_date,
-        first_purchase_date::TIMESTAMP  AS first_purchase_date
-    FROM resultado
-""")
 
-resultado = duckdb.sql("""
-    SELECT * FROM resultado where order_id is not null and customer_id is not null and product_id is not null
-""")
+# ── Funções do pipeline ───────────────────────────────────────────────────────
 
-resultado = duckdb.sql("""
-    SELECT * EXCLUDE (rn)
-    FROM (
-        SELECT *,
-            ROW_NUMBER() OVER (
-                PARTITION BY order_id
-                ORDER BY order_date DESC
-            ) AS rn
-        FROM resultado
-    )
-    WHERE rn = 1
-""").to_df()
+def load_and_clean(filepath: str) -> duckdb.DuckDBPyRelation:
+    """
+    Lê o CSV bruto e aplica as transformações principais via DuckDB:
+        - Filtros de qualidade (quantity, unit_price, discount_pct, chaves primárias)
+        - Cast de colunas de data para TIMESTAMP
+        - Cálculo da coluna derivada sale_value
+        - Deduplicação por order_id (mantém o registro mais recente)
 
-resultado = resultado.apply(lambda x: x.str.strip() if x.dtype == 'object' else x)
+    Args:
+        filepath: Caminho para o arquivo CSV de entrada.
 
-resultado = resultado.apply(lambda x: x.str.title() if x.dtype == 'object' else x)
+    Returns:
+        DuckDBPyRelation com os dados limpos e deduplicados.
 
-print(resultado.select_dtypes(include='object'))
+    Raises:
+        duckdb.IOException: Se houver erro na leitura do arquivo.
+    """
+    logger_transform.info("Iniciando leitura do arquivo: %s", filepath)
 
-print(resultado)
+    relation = duckdb.sql(f"""
+        WITH base AS (
+            -- Filtros de qualidade + cast de datas + cálculo de sale_value
+            SELECT
+                * EXCLUDE (order_date, last_purchase_date, first_purchase_date),
+                order_date::TIMESTAMP           AS order_date,
+                last_purchase_date::TIMESTAMP   AS last_purchase_date,
+                first_purchase_date::TIMESTAMP  AS first_purchase_date,
+                ROUND(quantity * unit_price * (1 - discount_pct), 2) AS sale_value
+            FROM '{filepath}'
+            WHERE quantity      > 0
+              AND unit_price    > 0
+              AND discount_pct  BETWEEN 0 AND 1
+              AND order_id      IS NOT NULL
+              AND customer_id   IS NOT NULL
+              AND product_id    IS NOT NULL
+        ),
+
+        deduplicado AS (
+            -- Mantém apenas o registro mais recente por order_id
+            SELECT * EXCLUDE (rn)
+            FROM (
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY order_id
+                        ORDER BY order_date DESC
+                    ) AS rn
+                FROM base
+            )
+            WHERE rn = 1
+        )
+
+        SELECT * FROM deduplicado
+    """)
+
+    logger_transform.info("Leitura e limpeza concluídas com sucesso.")
+    return relation
+
+
+def normalize_strings(relation: duckdb.DuckDBPyRelation) -> pd.DataFrame:
+    """
+    Detecta dinamicamente as colunas VARCHAR e aplica TRIM + INITCAP via DuckDB,
+    mantendo todo o processamento dentro do engine sem uso de pandas.apply().
+
+    Args:
+        relation: DuckDBPyRelation resultante da etapa de limpeza.
+
+    Returns:
+        DataFrame pandas com strings normalizadas.
+    """
+    logger_transform.info("Iniciando normalização de strings.")
+
+    # Detecta colunas string dinamicamente a partir dos tipos da relation
+    tipos = duckdb.sql("SELECT column_name, column_type FROM (DESCRIBE relation)").fetchall()
+    
+    colunas_str = [nome for nome, tipo in tipos if tipo == "VARCHAR"]
+    outras      = [nome for nome, tipo in tipos if tipo != "VARCHAR"]
+
+    logger_transform.info("Colunas VARCHAR detectadas: %s", colunas_str)
+
+    # Monta SELECT aplicando TRIM + INITCAP apenas nas colunas string
+    select_str = [
+    f'UPPER(SUBSTR(TRIM("{col}"), 1, 1)) || LOWER(SUBSTR(TRIM("{col}"), 2)) AS "{col}"'
+    for col in colunas_str
+]
+    select_final = ", ".join(outras + select_str)
+
+    df = duckdb.sql(f"SELECT {select_final} FROM relation").to_df()
+
+    logger_transform.info("Normalização concluída. Shape final: %s", df.shape)
+    return df
+
+
+def validate(df: pd.DataFrame) -> Tuple[bool, str]:
+    """
+    Executa validações de integridade no DataFrame final:
+        - Ausência de duplicatas em order_id
+        - sale_value não negativo
+        - Chaves primárias sem valores nulos (order_id, customer_id, product_id)
+
+    Args:
+        df: DataFrame final após todas as transformações.
+
+    Returns:
+        Tupla (sucesso: bool, mensagem: str) indicando resultado da validação.
+    """
+    logger_transform.info("Iniciando validações de integridade.")
+
+    if df["order_id"].duplicated().any():
+        return False, "Duplicatas encontradas em order_id."
+
+    if not df["sale_value"].ge(0).all():
+        return False, "Valores negativos encontrados em sale_value."
+
+    chaves = ["order_id", "customer_id", "product_id"]
+    if not df[chaves].notna().all().all():
+        return False, "Valores nulos encontrados nas chaves primárias."
+
+    return True, "Todas as validações passaram com sucesso."
+
+
+def run(filepath: str) -> pd.DataFrame:
+    """
+    Orquestra o pipeline completo de transformação:
+        1. Leitura e limpeza (load_and_clean)
+        2. Normalização de strings (normalize_strings)
+        3. Validação de integridade (validate)
+
+    Args:
+        filepath: Caminho para o arquivo CSV de entrada.
+
+    Returns:
+        DataFrame final transformado e validado.
+
+    Raises:
+        RuntimeError: Se alguma validação de integridade falhar.
+        Exception: Propaga exceções de leitura ou transformação com log de erro.
+    """
+    logger_transform.info("=" * 60)
+    logger_transform.info("Iniciando pipeline de transformação de vendas.")
+    logger_transform.info("=" * 60)
+
+    try:
+        # Etapa 1 — leitura, limpeza e deduplicação
+        relation = load_and_clean(filepath)
+
+        # Etapa 2 — normalização de strings
+        df_final = normalize_strings(relation)
+
+        # Etapa 3 — validação de integridade
+        ok, mensagem = validate(df_final)
+        if not ok:
+            logger_transform.error("Falha na validação: %s", mensagem)
+            raise RuntimeError(f"Validação falhou: {mensagem}")
+
+        logger_transform.info(mensagem)
+        logger_transform.info("Pipeline concluído. Total de registros: %d", len(df_final))
+        logger_transform.info("Colunas disponíveis: %s", list(df_final.columns))
+        logger_transform.info("=" * 60)
+
+        return df_final
+
+    except Exception as exc:
+        logger_transform.exception("Erro inesperado durante o pipeline: %s", exc)
+        raise
+
+
+# ── Entrypoint ────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    FILEPATH = "data/electronics_sales_raw.csv"
+
+    df = run(FILEPATH)
+    print(df.head())
