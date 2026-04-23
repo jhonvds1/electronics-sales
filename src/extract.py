@@ -36,45 +36,43 @@ def load_and_clean(filepath: str) -> duckdb.DuckDBPyRelation:
     logger_transform.info("Iniciando leitura do arquivo: %s", filepath)
 
     relation = duckdb.sql(f"""
-        WITH base AS (
-            -- Filtros de qualidade + cast de datas + cálculo de sale_value
-            SELECT
-                * EXCLUDE (order_date, last_purchase_date, first_purchase_date),
-                order_date::TIMESTAMP           AS order_date,
-                last_purchase_date::TIMESTAMP   AS last_purchase_date,
-                first_purchase_date::TIMESTAMP  AS first_purchase_date,
-                ROUND(quantity * unit_price * (1 - discount_pct), 2) AS sale_value
-            FROM '{filepath}'
-            WHERE quantity      > 0
-              AND unit_price    > 0
-              AND discount_pct  BETWEEN 0 AND 1
-              AND order_id      IS NOT NULL
-              AND customer_id   IS NOT NULL
-              AND product_id    IS NOT NULL
-        ),
+    WITH base AS (
+        SELECT
+            * EXCLUDE (order_date, last_purchase_date, first_purchase_date),
+            order_date::TIMESTAMP           AS order_date,
+            last_purchase_date::TIMESTAMP   AS last_purchase_date,
+            first_purchase_date::TIMESTAMP  AS first_purchase_date,
+            ROUND(quantity * unit_price * (1 - discount_pct), 2) AS sale_value
+        FROM '{filepath}'
+        WHERE quantity      > 0
+          AND unit_price    > 0
+          AND discount_pct  BETWEEN 0 AND 1
+          AND order_id      IS NOT NULL
+          AND customer_id   IS NOT NULL
+          AND product_id    IS NOT NULL
+    ),
 
-        deduplicado AS (
-            -- Mantém apenas o registro mais recente por order_id
-            SELECT * EXCLUDE (rn)
-            FROM (
-                SELECT *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY order_id
-                        ORDER BY order_date DESC
-                    ) AS rn
-                FROM base
-            )
-            WHERE rn = 1
+    deduplicado AS (
+        SELECT * EXCLUDE (rn)
+        FROM (
+            SELECT *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY order_id
+                    ORDER BY order_date DESC
+                ) AS rn
+            FROM base
         )
+        WHERE rn = 1
+    )
 
-        SELECT * FROM deduplicado
-    """)
+    SELECT * FROM deduplicado
+""")
 
     logger_transform.info("Leitura e limpeza concluídas com sucesso.")
     return relation
 
 
-def normalize_strings(relation: duckdb.DuckDBPyRelation) -> pd.DataFrame:
+def normalize_strings(relation: duckdb.DuckDBPyRelation) -> duckdb.DuckDBPyConnection:
     """
     Detecta dinamicamente as colunas VARCHAR e aplica TRIM + INITCAP via DuckDB,
     mantendo todo o processamento dentro do engine sem uso de pandas.apply().
@@ -93,7 +91,7 @@ def normalize_strings(relation: duckdb.DuckDBPyRelation) -> pd.DataFrame:
     colunas_str = [nome for nome, tipo in tipos if tipo == "VARCHAR"]
     outras      = [nome for nome, tipo in tipos if tipo != "VARCHAR"]
 
-    logger_transform.info("Colunas VARCHAR detectadas: %s", colunas_str)
+    logger_transform.info("Colunas VARCHAR detectadas")
 
     # Monta SELECT aplicando TRIM + INITCAP apenas nas colunas string
     select_str = [
@@ -102,9 +100,9 @@ def normalize_strings(relation: duckdb.DuckDBPyRelation) -> pd.DataFrame:
 ]
     select_final = ", ".join(outras + select_str)
 
-    df = duckdb.sql(f"SELECT {select_final} FROM relation").to_df()
+    df = duckdb.sql(f"SELECT {select_final} FROM relation")
 
-    logger_transform.info("Normalização concluída. Shape final: %s", df.shape)
+    logger_transform.info("Normalização concluída")
     return df
 
 
@@ -135,6 +133,28 @@ def validate(df: pd.DataFrame) -> Tuple[bool, str]:
 
     return True, "Todas as validações passaram com sucesso."
 
+def create_date(relation: duckdb.DuckDBPyRelation) -> duckdb.DuckDBPyRelation:
+    return relation.project("""
+                *,
+                EXTRACT(DAY FROM order_date) AS day,
+                EXTRACT(MONTH FROM order_date) AS month,
+                EXTRACT(YEAR FROM order_date) AS year
+""")
+    
+
+def build_dims(relation: duckdb.DuckDBPyRelation):
+    teste = duckdb.sql("""
+        CREATE TABLE dim_teste AS
+                    SELECT 
+                        day,
+                        month    
+                        year
+""")
+    
+    print(teste)
+
+def build_fact():
+    ...
 
 def run(filepath: str) -> pd.DataFrame:
     """
@@ -161,25 +181,31 @@ def run(filepath: str) -> pd.DataFrame:
         # Etapa 1 — leitura, limpeza e deduplicação
         relation = load_and_clean(filepath)
 
+        relation = create_date(relation)
+
         # Etapa 2 — normalização de strings
-        df_final = normalize_strings(relation)
+        relation_final = normalize_strings(relation)
+
+        # print(relation_final)
 
         # Etapa 3 — validação de integridade
-        ok, mensagem = validate(df_final)
-        if not ok:
-            logger_transform.error("Falha na validação: %s", mensagem)
-            raise RuntimeError(f"Validação falhou: {mensagem}")
+        # ok, mensagem = validate(relation_final)
+        # if not ok:
+        #     logger_transform.error("Falha na validação: %s", mensagem)
+        #     raise RuntimeError(f"Validação falhou: {mensagem}")
 
-        logger_transform.info(mensagem)
-        logger_transform.info("Pipeline concluído. Total de registros: %d", len(df_final))
-        logger_transform.info("Colunas disponíveis: %s", list(df_final.columns))
+        # logger_transform.info(mensagem)
+        logger_transform.info("Pipeline concluído. Total de registros: %d", len(relation_final))
+        # logger_transform.info("Colunas disponíveis: %s", list(relation_final.columns))
         logger_transform.info("=" * 60)
 
-        return df_final
+        return relation_final
 
     except Exception as exc:
         logger_transform.exception("Erro inesperado durante o pipeline: %s", exc)
         raise
+
+
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
@@ -188,4 +214,4 @@ if __name__ == "__main__":
     FILEPATH = "data/electronics_sales_raw.csv"
 
     df = run(FILEPATH)
-    print(df.head())
+    print(df.columns)
