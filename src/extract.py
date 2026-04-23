@@ -1,20 +1,3 @@
-"""
-transform_electronics_sales.py
---------------------------------
-Pipeline de transformação de dados de vendas de eletrônicos.
-
-Etapas:
-    1. Leitura do CSV bruto via DuckDB
-    2. Filtros de qualidade, cast de datas e cálculo de sale_value
-    3. Deduplicação por order_id (mantém registro mais recente)
-    4. Normalização de strings (TRIM + INITCAP) em colunas VARCHAR
-    5. Validação de integridade do resultado final
-
-Autor  : <seu_nome>
-Data   : 2026-04-22
-Versão : 1.0.0
-"""
-
 import logging
 from typing import Tuple
 
