@@ -142,7 +142,7 @@ def create_date(relation: duckdb.DuckDBPyRelation) -> duckdb.DuckDBPyRelation:
 """)
     
 
-def build_dims(relation: duckdb.DuckDBPyRelation):
+def build_dims(relation: duckdb.DuckDBPyRelation) -> None:
     teste = duckdb.sql("""
         CREATE TABLE dim_teste AS
                     SELECT 
@@ -153,7 +153,7 @@ def build_dims(relation: duckdb.DuckDBPyRelation):
     
     print(teste)
 
-def build_fact():
+def build_fact(relation: duckdb.DuckDBPyRelation) -> None:
     ...
 
 def run(filepath: str) -> pd.DataFrame:
@@ -186,7 +186,7 @@ def run(filepath: str) -> pd.DataFrame:
         # Etapa 2 — normalização de strings
         relation_final = normalize_strings(relation)
 
-        # print(relation_final)
+        build_dims(relation_final)
 
         # Etapa 3 — validação de integridade
         # ok, mensagem = validate(relation_final)
