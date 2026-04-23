@@ -38,10 +38,8 @@ def load_and_clean(filepath: str) -> duckdb.DuckDBPyRelation:
     relation = duckdb.sql(f"""
     WITH base AS (
         SELECT
-            * EXCLUDE (order_date, last_purchase_date, first_purchase_date),
-            order_date::TIMESTAMP           AS order_date,
-            last_purchase_date::TIMESTAMP   AS last_purchase_date,
-            first_purchase_date::TIMESTAMP  AS first_purchase_date,
+            * EXCLUDE (quantity),
+            quantity::INT AS quantity,
             ROUND(quantity * unit_price * (1 - discount_pct), 2) AS sale_value
         FROM '{filepath}'
         WHERE quantity      > 0
@@ -136,22 +134,25 @@ def validate(df: pd.DataFrame) -> Tuple[bool, str]:
 def create_date(relation: duckdb.DuckDBPyRelation) -> duckdb.DuckDBPyRelation:
     return relation.project("""
                 *,
-                EXTRACT(DAY FROM order_date) AS day,
-                EXTRACT(MONTH FROM order_date) AS month,
-                EXTRACT(YEAR FROM order_date) AS year
+                EXTRACT(DAY FROM order_date)::INT AS day,
+                EXTRACT(MONTH FROM order_date)::INT AS month,
+                EXTRACT(YEAR FROM order_date)::INT AS year
 """)
-    
 
 def build_dims(relation: duckdb.DuckDBPyRelation) -> None:
-    teste = duckdb.sql("""
-        CREATE TABLE dim_teste AS
-                    SELECT 
+    logger_transform.info("Iniciando criação de dimensões")
+    duckdb.sql("""
+        CREATE OR REPLACE TABLE dim_teste AS
+                    SELECT DISTINCT 
                         day,
-                        month    
+                        month,    
                         year
+                    FROM relation
 """)
-    
-    print(teste)
+
+    logger_transform.info("=" * 60)
+    logger_transform.info("dimensões criadas com sucesso!")
+    logger_transform.info("=" * 60)
 
 def build_fact(relation: duckdb.DuckDBPyRelation) -> None:
     ...
@@ -214,4 +215,3 @@ if __name__ == "__main__":
     FILEPATH = "data/electronics_sales_raw.csv"
 
     df = run(FILEPATH)
-    print(df.columns)
