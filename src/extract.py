@@ -139,23 +139,179 @@ def create_date(relation: duckdb.DuckDBPyRelation) -> duckdb.DuckDBPyRelation:
                 EXTRACT(YEAR FROM order_date)::INT AS year
 """)
 
-def build_dims(relation: duckdb.DuckDBPyRelation) -> None:
-    logger_transform.info("Iniciando criação de dimensões")
+def build_and_populate_tables(relation: duckdb.DuckDBPyRelation) -> None:
+    """
+    Cria e popula as tabelas dimensão e fato do DW.
+    Utiliza ON CONFLICT DO NOTHING para garantir idempotência —
+    a função pode ser chamada múltiplas vezes sem duplicar dados.
+    
+    Args:
+        relation: DuckDBPyRelation com os dados já tratados
+    """
+
+    logger_transform.info("Iniciando build do Data Warehouse...")
+
+    # ------------------------------------------------------------------ #
+    #  DIM_PRODUCT                                                         #
+    # ------------------------------------------------------------------ #
+
+    logger_transform.info("[1/5] Criando tabela dim_product...")
     duckdb.sql("""
-        CREATE OR REPLACE TABLE dim_teste AS
-                    SELECT DISTINCT 
-                        day,
-                        month,    
-                        year
-                    FROM relation
-""")
+        CREATE TABLE IF NOT EXISTS dim_product(
+            product_id   VARCHAR(6)    PRIMARY KEY,
+            product_name VARCHAR(30),
+            unit_price   DECIMAL(12,2)
+        )
+    """)
 
-    logger_transform.info("=" * 60)
-    logger_transform.info("dimensões criadas com sucesso!")
-    logger_transform.info("=" * 60)
+    logger_transform.info("[1/5] Populando dim_product...")
+    duckdb.sql("""
+        INSERT INTO dim_product (product_id, product_name, unit_price)
+        SELECT
+            product_id,
+            product_name,
+            unit_price
+        FROM relation
+        ON CONFLICT (product_id) DO NOTHING
+    """)
 
-def build_fact(relation: duckdb.DuckDBPyRelation) -> None:
-    ...
+    total = duckdb.sql("SELECT COUNT(*) FROM dim_product").fetchone()[0]
+    logger_transform.info(f"[1/5] dim_product OK — {total} produtos carregados.")
+
+    # ------------------------------------------------------------------ #
+    #  DIM_REPRESENTATIVE                                                  #
+    # ------------------------------------------------------------------ #
+
+    logger_transform.info("[2/5] Criando tabela dim_representative...")
+
+    duckdb.sql("CREATE SEQUENCE IF NOT EXISTS seq_representative START 1")
+    
+    duckdb.sql("""
+        CREATE TABLE IF NOT EXISTS dim_representative(
+            rep_id INTEGER PRIMARY KEY DEFAULT NEXTVAL('seq_representative'),
+            sales_rep VARCHAR(20) UNIQUE        -- UNIQUE necessário para o ON CONFLICT funcionar
+        )
+    """)
+
+    logger_transform.info("[2/5] Populando dim_representative...")
+    duckdb.sql("""
+        INSERT INTO dim_representative (sales_rep)
+        SELECT DISTINCT sales_rep              -- DISTINCT evita tentar inserir o mesmo rep duas vezes
+        FROM relation
+        ON CONFLICT (sales_rep) DO NOTHING
+    """)
+
+    total = duckdb.sql("SELECT COUNT(*) FROM dim_representative").fetchone()[0]
+    logger_transform.info(f"[2/5] dim_representative OK — {total} representantes carregados.")
+
+    # ------------------------------------------------------------------ #
+    #  DIM_CUSTOMER                                                        #
+    # ------------------------------------------------------------------ #
+
+    logger_transform.info("[3/5] Criando tabela dim_customer...")
+    duckdb.sql("""
+        CREATE TABLE IF NOT EXISTS dim_customer(
+            customer_id         VARCHAR(6)  PRIMARY KEY,
+            customer_type       VARCHAR(15),
+            first_purchase_date DATE,
+            last_purchase_date  DATE,
+            region              VARCHAR(10)
+        )
+    """)
+
+    logger_transform.info("[3/5] Populando dim_customer...")
+    duckdb.sql("""
+        INSERT INTO dim_customer (customer_id, customer_type, first_purchase_date, last_purchase_date, region)
+        SELECT
+            customer_id,
+            customer_type,
+            first_purchase_date,
+            last_purchase_date,
+            region
+        FROM relation
+        ON CONFLICT (customer_id) DO NOTHING
+    """)
+
+    total = duckdb.sql("SELECT COUNT(*) FROM dim_customer").fetchone()[0]
+    logger_transform.info(f"[3/5] dim_customer OK — {total} clientes carregados.")
+
+    # ------------------------------------------------------------------ #
+    #  DIM_TIME                                                            #
+    # ------------------------------------------------------------------ #
+
+    logger_transform.info("[4/5] Criando tabela dim_time...")
+
+    duckdb.sql("CREATE SEQUENCE IF NOT EXISTS seq_time START 1")
+
+    duckdb.sql("""
+        CREATE TABLE IF NOT EXISTS dim_time(
+            time_id    INTEGER     PRIMARY KEY DEFAULT nextval('seq_time'),
+            date       DATE        UNIQUE,      -- UNIQUE para o ON CONFLICT funcionar por data
+            day        INT,
+            month      INT,
+            year       INT,
+            month_name VARCHAR(15)
+        )
+    """)
+
+    logger_transform.info("[4/5] Populando dim_time...")
+    duckdb.sql("""
+        INSERT INTO dim_time (date, day, month, year, month_name)
+        SELECT
+            order_date,
+            EXTRACT(day   FROM order_date)::INT   AS day,
+            EXTRACT(month FROM order_date)::INT   AS month,
+            EXTRACT(year  FROM order_date)::INT   AS year,
+            strftime(order_date, '%B')            AS month_name
+        FROM relation
+        ON CONFLICT (date) DO NOTHING
+    """)
+
+    total = duckdb.sql("SELECT COUNT(*) FROM dim_time").fetchone()[0]
+    logger_transform.info(f"[4/5] dim_time OK — {total} datas carregadas.")
+
+    # ------------------------------------------------------------------ #
+    #  FACT_ORDER                                                          #
+    # ------------------------------------------------------------------ #
+
+    logger_transform.info("[5/5] Criando tabela fact_order...")
+    duckdb.sql("""
+        CREATE TABLE IF NOT EXISTS fact_order(
+            order_id     BIGINT        PRIMARY KEY,
+            customer_id  VARCHAR(6)    REFERENCES dim_customer(customer_id),
+            rep_id       INT           REFERENCES dim_representative(rep_id),
+            product_id   VARCHAR(6)    REFERENCES dim_product(product_id),
+            time_id      INT           REFERENCES dim_time(time_id),
+            quantity     INT,
+            discount_pct DECIMAL(3,2),
+            sale_value   DECIMAL(12,2)
+        )
+    """)
+
+    logger_transform.info("[5/5] Populando fact_order...")
+    duckdb.sql("""
+        INSERT INTO fact_order (order_id, customer_id, rep_id, product_id, time_id, quantity, discount_pct, sale_value)
+        SELECT
+            r.order_id,
+            r.customer_id,
+            dr.rep_id,         -- pega o rep_id gerado na dim_representative
+            r.product_id,
+            dt.time_id,        -- pega o time_id gerado na dim_time
+            r.quantity,
+            r.discount_pct,
+            r.sale_value
+        FROM relation r
+        JOIN dim_representative dr ON dr.sales_rep = r.sales_rep
+        JOIN dim_time           dt ON dt.date      = r.order_date
+        ON CONFLICT (order_id) DO NOTHING
+    """)
+
+    total = duckdb.sql("SELECT COUNT(*) FROM fact_order").fetchone()[0]
+    logger_transform.info(f"[5/5] fact_order OK — {total} pedidos carregados.")
+
+    # ------------------------------------------------------------------ #
+
+    logger_transform.info("Build do Data Warehouse concluído com sucesso!")
 
 def run(filepath: str) -> pd.DataFrame:
     """
@@ -187,7 +343,7 @@ def run(filepath: str) -> pd.DataFrame:
         # Etapa 2 — normalização de strings
         relation_final = normalize_strings(relation)
 
-        build_dims(relation_final)
+        build_and_populate_tables(relation_final)
 
         # Etapa 3 — validação de integridade
         # ok, mensagem = validate(relation_final)

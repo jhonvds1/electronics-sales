@@ -7,7 +7,3 @@ Como a receita se distribui por região?
 Quais representantes de vendas geram mais receita?
 Qual a porcentagem de clientes que retornam após a primeira compra?
 Qual o tempo médio entre a primeira e a segunda compra?
-
-  date date
-  day_name varchar
-  month_name varchar
