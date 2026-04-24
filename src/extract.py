@@ -312,28 +312,23 @@ def build_and_populate_tables(relation: duckdb.DuckDBPyRelation) -> None:
 
     logger_transform.info("Build do Data Warehouse concluído com sucesso!")
 
-def save_parquet() -> None:
+def save_parquet(tables: list[str], layer: str) -> None:
     """
-    Grava as tabelas do modelo estrela em arquivos Parquet no diretório data/gold/.
+    Grava uma lista de tabelas em arquivos Parquet no diretório data/{layer}/.
 
-    As seguintes tabelas são exportadas:
-        - fact_order
-        - dim_customer
-        - dim_product
-        - dim_time
-        - dim_representative
+    Args:
+        tables: Lista com os nomes das tabelas a serem gravadas.
+        layer:  Camada do lakehouse onde os arquivos serão salvos (ex: 'silver', 'gold').
 
     Raises:
         duckdb.Error: Se ocorrer um erro ao gravar alguma tabela no formato Parquet.
     """
     logger_transform.info("Iniciando Gravação dos Dados")
 
-    os.makedirs("data/gold", exist_ok=True)
-
-    tables = ["fact_order", "dim_customer", "dim_product", "dim_time", "dim_representative"]
+    os.makedirs(f"data/{layer}", exist_ok=True)
 
     for table in tables:
-        path = f"data/gold/{table}.parquet"
+        path = f"data/{layer}/{table}.parquet"
         try:
             logger_transform.info(f"Gravando dados da tabela {table}")
             duckdb.sql(f"""
@@ -378,9 +373,15 @@ def run(filepath: str) -> pd.DataFrame:
         # Etapa 2 — normalização de strings
         relation_final = normalize_strings(relation)
 
+        duckdb.register("electronics_sales_clean", relation_final)
+
+        save_parquet(tables=['electronics_sales_clean'], layer='silver')
+
+        duckdb.execute("DROP VIEW IF EXISTS electronics_sales_clean")
+
         build_and_populate_tables(relation_final)
 
-        save_parquet()
+        save_parquet(tables=["fact_order", "dim_customer", "dim_product", "dim_time", "dim_representative"], layer="gold")
 
         # Etapa 3 — validação de integridade
         # ok, mensagem = validate(relation_final)
