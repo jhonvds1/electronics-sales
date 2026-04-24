@@ -1,6 +1,7 @@
 import logging
 from typing import Tuple
 
+import os
 import duckdb
 import pandas as pd
 
@@ -69,7 +70,6 @@ def load_and_clean(filepath: str) -> duckdb.DuckDBPyRelation:
     logger_transform.info("Leitura e limpeza concluídas com sucesso.")
     return relation
 
-
 def normalize_strings(relation: duckdb.DuckDBPyRelation) -> duckdb.DuckDBPyConnection:
     """
     Detecta dinamicamente as colunas VARCHAR e aplica TRIM + INITCAP via DuckDB,
@@ -102,7 +102,6 @@ def normalize_strings(relation: duckdb.DuckDBPyRelation) -> duckdb.DuckDBPyConne
 
     logger_transform.info("Normalização concluída")
     return df
-
 
 def validate(df: pd.DataFrame) -> Tuple[bool, str]:
     """
@@ -313,6 +312,42 @@ def build_and_populate_tables(relation: duckdb.DuckDBPyRelation) -> None:
 
     logger_transform.info("Build do Data Warehouse concluído com sucesso!")
 
+def save_parquet() -> None:
+    """
+    Grava as tabelas do modelo estrela em arquivos Parquet no diretório data/gold/.
+
+    As seguintes tabelas são exportadas:
+        - fact_order
+        - dim_customer
+        - dim_product
+        - dim_time
+        - dim_representative
+
+    Raises:
+        duckdb.Error: Se ocorrer um erro ao gravar alguma tabela no formato Parquet.
+    """
+    logger_transform.info("Iniciando Gravação dos Dados")
+
+    os.makedirs("data/gold", exist_ok=True)
+
+    tables = ["fact_order", "dim_customer", "dim_product", "dim_time", "dim_representative"]
+
+    for table in tables:
+        path = f"data/gold/{table}.parquet"
+        try:
+            logger_transform.info(f"Gravando dados da tabela {table}")
+            duckdb.sql(f"""
+                COPY {table}
+                TO '{path}'
+                (FORMAT PARQUET)
+            """)
+            logger_transform.info(f"Dados da tabela {table} gravados em {path}")
+        except duckdb.Error as e:
+            logger_transform.error(f"Erro ao gravar tabela {table}: {e}")
+            raise
+
+    logger_transform.info("Finalizando Gravação dos Dados")
+
 def run(filepath: str) -> pd.DataFrame:
     """
     Orquestra o pipeline completo de transformação:
@@ -345,6 +380,8 @@ def run(filepath: str) -> pd.DataFrame:
 
         build_and_populate_tables(relation_final)
 
+        save_parquet()
+
         # Etapa 3 — validação de integridade
         # ok, mensagem = validate(relation_final)
         # if not ok:
@@ -368,6 +405,8 @@ def run(filepath: str) -> pd.DataFrame:
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    FILEPATH = "data/electronics_sales_raw.csv"
+    FILEPATH = "data/bronze/electronics_sales_raw.csv"
 
     df = run(FILEPATH)
+
+#TODO: CORRIGIR VALIDATE
