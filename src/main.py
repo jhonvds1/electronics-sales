@@ -12,7 +12,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+logger_extract = logging.getLogger("EXTRACT")
 logger_transform = logging.getLogger("TRANSFORM")
+logger_load = logging.getLogger("LOAD")
+logger_main = logging.getLogger("MAIN")
 
 
 # ── Funções do pipeline ───────────────────────────────────────────────────────
@@ -34,7 +37,7 @@ def load_and_clean(filepath: str) -> duckdb.DuckDBPyRelation:
     Raises:
         duckdb.IOException: Se houver erro na leitura do arquivo.
     """
-    logger_transform.info("Iniciando leitura do arquivo: %s", filepath)
+    logger_extract.info("Iniciando leitura do arquivo: %s", filepath)
 
     relation = duckdb.sql(f"""
     WITH base AS (
@@ -67,7 +70,7 @@ def load_and_clean(filepath: str) -> duckdb.DuckDBPyRelation:
     SELECT * FROM deduplicado
 """)
 
-    logger_transform.info("Leitura e limpeza concluídas com sucesso.")
+    logger_extract.info("Leitura e limpeza concluídas com sucesso.")
     return relation
 
 def normalize_strings(relation: duckdb.DuckDBPyRelation) -> duckdb.DuckDBPyConnection:
@@ -102,33 +105,6 @@ def normalize_strings(relation: duckdb.DuckDBPyRelation) -> duckdb.DuckDBPyConne
 
     logger_transform.info("Normalização concluída")
     return df
-
-def validate(df: pd.DataFrame) -> Tuple[bool, str]:
-    """
-    Executa validações de integridade no DataFrame final:
-        - Ausência de duplicatas em order_id
-        - sale_value não negativo
-        - Chaves primárias sem valores nulos (order_id, customer_id, product_id)
-
-    Args:
-        df: DataFrame final após todas as transformações.
-
-    Returns:
-        Tupla (sucesso: bool, mensagem: str) indicando resultado da validação.
-    """
-    logger_transform.info("Iniciando validações de integridade.")
-
-    if df["order_id"].duplicated().any():
-        return False, "Duplicatas encontradas em order_id."
-
-    if not df["sale_value"].ge(0).all():
-        return False, "Valores negativos encontrados em sale_value."
-
-    chaves = ["order_id", "customer_id", "product_id"]
-    if not df[chaves].notna().all().all():
-        return False, "Valores nulos encontrados nas chaves primárias."
-
-    return True, "Todas as validações passaram com sucesso."
 
 def create_date(relation: duckdb.DuckDBPyRelation) -> duckdb.DuckDBPyRelation:
     return relation.project("""
@@ -323,27 +299,27 @@ def save_parquet(tables: list[str], layer: str) -> None:
     Raises:
         duckdb.Error: Se ocorrer um erro ao gravar alguma tabela no formato Parquet.
     """
-    logger_transform.info("Iniciando Gravação dos Dados")
+    logger_load.info("Iniciando Gravação dos Dados")
 
     os.makedirs(f"data/{layer}", exist_ok=True)
 
     for table in tables:
         path = f"data/{layer}/{table}.parquet"
         try:
-            logger_transform.info(f"Gravando dados da tabela {table}")
+            logger_load.info(f"Gravando dados da tabela {table}")
             duckdb.sql(f"""
                 COPY {table}
                 TO '{path}'
                 (FORMAT PARQUET)
             """)
-            logger_transform.info(f"Dados da tabela {table} gravados em {path}")
+            logger_load.info(f"Dados da tabela {table} gravados em {path}")
         except duckdb.Error as e:
-            logger_transform.error(f"Erro ao gravar tabela {table}: {e}")
+            logger_load.error(f"Erro ao gravar tabela {table}: {e}")
             raise
 
-    logger_transform.info("Finalizando Gravação dos Dados")
+    logger_load.info("Finalizando Gravação dos Dados")
 
-def run(filepath: str) -> pd.DataFrame:
+def run(filepath: str) -> None:
     """
     Orquestra o pipeline completo de transformação:
         1. Leitura e limpeza (load_and_clean)
@@ -360,9 +336,9 @@ def run(filepath: str) -> pd.DataFrame:
         RuntimeError: Se alguma validação de integridade falhar.
         Exception: Propaga exceções de leitura ou transformação com log de erro.
     """
-    logger_transform.info("=" * 60)
-    logger_transform.info("Iniciando pipeline de transformação de vendas.")
-    logger_transform.info("=" * 60)
+    logger_main.info("=" * 60)
+    logger_main.info("Iniciando pipeline de transformação de vendas.")
+    logger_main.info("=" * 60)
 
     try:
         # Etapa 1 — leitura, limpeza e deduplicação
@@ -383,21 +359,11 @@ def run(filepath: str) -> pd.DataFrame:
 
         save_parquet(tables=["fact_order", "dim_customer", "dim_product", "dim_time", "dim_representative"], layer="gold")
 
-        # Etapa 3 — validação de integridade
-        # ok, mensagem = validate(relation_final)
-        # if not ok:
-        #     logger_transform.error("Falha na validação: %s", mensagem)
-        #     raise RuntimeError(f"Validação falhou: {mensagem}")
-
-        # logger_transform.info(mensagem)
-        logger_transform.info("Pipeline concluído. Total de registros: %d", len(relation_final))
-        # logger_transform.info("Colunas disponíveis: %s", list(relation_final.columns))
-        logger_transform.info("=" * 60)
-
-        return relation_final
+        logger_main.info("Pipeline concluído. Total de registros: %d", len(relation_final))
+        logger_main.info("=" * 60)
 
     except Exception as exc:
-        logger_transform.exception("Erro inesperado durante o pipeline: %s", exc)
+        logger_main.exception("Erro inesperado durante o pipeline: %s", exc)
         raise
 
 
@@ -408,6 +374,4 @@ def run(filepath: str) -> pd.DataFrame:
 if __name__ == "__main__":
     FILEPATH = "data/bronze/electronics_sales_raw.csv"
 
-    df = run(FILEPATH)
-
-#TODO: CORRIGIR VALIDATE
+    run(FILEPATH)
